@@ -1,418 +1,458 @@
 ---
 name: book-to-skill
-description: Converts a technical book (PDF or EPUB) into a structured Claude Code skill — extracting frameworks, mental models, principles, techniques, and anti-patterns the author crystallized. Use when the user wants to study a book through Claude, apply an author's frameworks while working, or build a reusable knowledge base from any PDF or EPUB.
-when_to_use: Trigger phrases — "turn this book into a skill", "create a skill from this PDF", "create a skill from this EPUB", "I want to study X book", "add this book to my skills", "convert PDF to skill", "convert EPUB to skill", "analyze this book", "extract frameworks from this book". Accepts a path to a PDF or EPUB and optional skill name slug.
-disable-model-invocation: true
-context: fork
-agent: general-purpose
-allowed-tools: Bash(python3 *) Bash(pdftotext *) Bash(mkdir *) Bash(cp *) Bash(find *) Bash(wc *) Bash(echo *) Bash(cat *) Bash(date *) Read Write Glob Grep
-argument-hint: <path-to-pdf-or-epub> [skill-name-slug]
-arguments: [book_path, skill_name]
-effort: high
+description: "Конвертирует PDF или EPUB книгу в отдельный Hermes Agent skill: извлекает текст, выделяет главы, ключевые понятия, фреймворки, паттерны, анти-паттерны и создает папку с SKILL.md, chapter-файлами, glossary.md, patterns.md и cheatsheet.md."
+version: 1.1.0
+license: MIT
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [documents, books, pdf, epub, skills, knowledge-base, conversion]
 ---
 
-# Book-to-Skill Converter
+# Book-to-Skill для Hermes Agent
 
-Transform written knowledge into actionable Claude Code skills by extracting structure — not producing summaries.
+## Когда использовать
 
-## Philosophy
+Используй этот скилл, когда пользователь хочет превратить книгу, статью, руководство, PDF или EPUB в переиспользуемый скилл Hermes Agent. Типовые формулировки: «сделай скилл из книги», «конвертируй PDF в skill», «создай skill из EPUB», «извлеки фреймворки из книги», «хочу использовать эту книгу как базу знаний агента».
 
-Books contain crystallized expertise: frameworks, principles, and techniques that took years to develop. This skill extracts that knowledge into a format Claude can leverage repeatedly.
+## Назначение
 
-**Extract structure, not summaries.** A skill isn't a book report. It's a toolkit of:
-- Named frameworks (mental models with clear application)
-- Actionable principles (rules that guide decisions)
-- Techniques (step-by-step methods)
-- Anti-patterns (what to avoid and why)
-- Voice calibration (how the author thinks and communicates)
+Скилл превращает одну книгу в компактный прикладной набор инструкций для агента. Цель — не пересказать книгу, а извлечь из нее рабочие модели: фреймворки, принципы, методы, определения, таблицы решений, анти-паттерны и указатель тем.
 
-**Preserve the author's precision.** Frameworks often have specific names for reasons. "The 5 Whys" isn't interchangeable with "ask why multiple times." Capture the exact formulation.
-
-**Layer depth appropriately.** Simple books → simple skills. Complex books with 10+ frameworks → skills with reference files and on-demand chapters.
-
----
-
-## Modes of Operation
-
-Three paths available. Route based on what the user asks:
-
-### 1. Full Conversion (Default)
-**Trigger:** User provides a PDF path without special instructions
-**Action:** Run all steps below (Steps 0–9)
-**Output:** Complete skill with SKILL.md, chapters/, glossary, patterns, cheatsheet
-
-### 2. Analyze Only
-**Trigger:** User says "analyze", "just extract", or "I want to review before generating"
-**Action:** Run Steps 0–3, then produce a structured extraction report (frameworks, principles, techniques found). Stop — do NOT generate skill files.
-**Output:** Analysis report for user review
-
-### 3. Generate from Prior Analysis
-**Trigger:** User has existing analysis notes or previously ran analyze-only
-**Action:** Skip Steps 0–3, use the provided analysis as input, run Steps 4–9
-**Output:** Skill files from the provided analysis
-
----
-
-## Step 0 — Out-of-scope check
-
-If the argument is NOT a path to a PDF or EPUB file, stop and respond:
-> "book-to-skill requires a PDF or EPUB path. Usage: `/book-to-skill /path/to/book.pdf [skill-name]` or `/book-to-skill /path/to/book.epub [skill-name]`"
-
----
-
-## Step 1 — Validate input
+Результат создается как отдельный Hermes skill в каталоге:
 
 ```bash
-test -f "$0" && echo "FILE_OK" || echo "FILE_NOT_FOUND: $0"
-file "$0" | grep -iE "pdf|epub|zip" && echo "FORMAT_OK" || echo "FORMAT_UNKNOWN"
+~/.hermes/skills/<skill-name>/
 ```
 
-Check the file extension (`.pdf` or `.epub`) or magic bytes (`%PDF` or `PK` zip header).
+Структура результата:
 
-If the file is not found or the format is not supported, stop with a clear error message listing supported formats.
+```text
+<skill-name>/
+├── SKILL.md
+├── chapters/
+│   ├── ch01-*.md
+│   ├── ch02-*.md
+│   └── ...
+├── glossary.md
+├── patterns.md
+└── cheatsheet.md
+```
 
----
+## Входные данные
 
-## Step 1.5 — Identify book type
+Пользователь должен дать путь к файлу PDF или EPUB и, при желании, короткое имя будущего скилла.
 
-Before extracting, ask the user:
-
-> "What kind of content does this book have? This helps me choose the best extraction method.
->
-> 1. **Technical** — has code blocks, tables, formulas, diagrams (e.g. programming books, academic papers, architecture guides)
-> 2. **Text-heavy** — mostly prose, few or no tables/code (e.g. management, productivity, narrative non-fiction)
-> 3. **Not sure** — I'll use the fast method and warn you if quality seems limited"
-
-Store the answer as `BOOK_TYPE`:
-- Option 1 → `BOOK_TYPE=technical`
-- Option 2 → `BOOK_TYPE=text`
-- Option 3 → `BOOK_TYPE=text`
-
-**If `BOOK_TYPE=technical`**, inform the user before proceeding:
-> "📐 Technical mode selected — using Docling for structure-aware extraction (tables, code blocks, formulas preserved as markdown). This takes ~1.5s per page, so expect a few minutes for longer books. Starting now…"
-
-**If `BOOK_TYPE=text`**, inform:
-> "📄 Text mode selected — using fast extraction (pdftotext). Ready in seconds."
-
----
-
-## Step 2 — Extract text from PDF or EPUB
-
-Run the extraction script, passing the book type:
+Примеры:
 
 ```bash
-python3 ~/.claude/skills/book-to-skill/scripts/extract.py "$0" --mode <BOOK_TYPE>
+/book-to-skill /home/immor/books/designing-data-intensive-applications.pdf
+/book-to-skill /home/immor/books/clean-code.epub clean-code
+/book-to-skill /mnt/c/Users/immor/Downloads/book.pdf my-book-skill
 ```
 
-- `--mode technical` → uses Docling (layout-aware, preserves tables and code blocks as markdown)
-- `--mode text` → uses pdftotext → PyPDF2 → pdfminer fallback chain (fast, plain text)
+Если путь не указан или файл не является PDF/EPUB, остановись и объясни правильный формат команды.
 
-This creates:
-- `/tmp/book_skill_work/full_text.txt` — full extracted text
-- `/tmp/book_skill_work/metadata.json` — title, estimated pages, token count, size, extraction_mode
+## Подготовка зависимостей
 
-Read `/tmp/book_skill_work/metadata.json` to understand what was extracted.
+Для обычных текстовых PDF предпочтителен `pdftotext` из `poppler-utils`. Для EPUB полезны `ebooklib` и `beautifulsoup4`. Для сложных технических PDF с таблицами и кодом можно использовать `docling`, но он работает медленнее.
 
----
-
-## Step 2.5 — Pre-flight cost estimate
-
-Read `/tmp/book_skill_work/metadata.json` and present the user with an estimate **before doing any generation**:
-
-```
-📖 Book detected: <filename> (<format: PDF or EPUB>)
-📄 Pages/Spine items: ~<N> | Words: ~<N> | Source tokens: ~<N>K
-
-💰 Estimated token cost (Full Conversion):
-   Input  (book reading + prompts): ~<N>K tokens
-   Output (skill files generated):  ~<N>K tokens
-   Total:                           ~<N>K tokens
-
-   Reference prices (as of 2025):
-   Claude Sonnet 4.5 → ~$<X> USD
-   Claude Haiku 4.5  → ~$<X> USD
-
-   ⏱  Estimated time: ~<N> minutes
-
-📁 Files to be generated:
-   SKILL.md + <N> chapter files + glossary + patterns + cheatsheet
-
-➡  Proceed with Full Conversion? (or type "analyze only" to preview first)
-```
-
-**How to estimate:**
-- Input tokens ≈ `estimated_tokens` from metadata × 1.3 (prompts overhead per chapter pass)
-- Output tokens ≈ chapters × 1,000 + 4,000 (SKILL.md) + 4,500 (glossary + patterns + cheatsheet)
-- Price: Sonnet input=$3/MTok output=$15/MTok — Haiku input=$0.80/MTok output=$4/MTok
-
-Wait for the user to confirm before proceeding. If they say "analyze only", switch to Mode 2.
-
----
-
-## Step 3 — Analyze book structure
-
-Read the first 8,000 characters of `/tmp/book_skill_work/full_text.txt` to identify:
-- Book **title** and **author(s)**
-- **Chapter structure** (look for "Chapter N", "PART I", numbered headings, table of contents)
-- **Core themes** and subject domain
-- Approximate number of chapters
-
-Then read the Table of Contents section if present to map all chapters.
-
-**If mode is "Analyze Only":** produce the extraction report now and stop. Structure:
-```
-## Extraction Report — <Title>
-
-### Author's Core Frameworks
-- **<Framework Name>**: <what it is and when to apply>
-
-### Key Principles
-- <Principle>: <actionable rule>
-
-### Techniques & Methods
-- <Technique>: <step-by-step or how-to>
-
-### Anti-patterns
-- <What to avoid>: <why>
-
-### Suggested Skill Name
-`{author-lastname}-{core-concept}` — e.g. `cialdini-influence`
-
-### Chapters Detected
-| # | Title | Main Frameworks |
-```
-
----
-
-## Step 4 — Ask purpose (Full Conversion only)
-
-Before generating, ask the user:
-
-> "What should this skill help you do? (Pick one or more)
-> 1. Apply the author's frameworks while working
-> 2. Think with the author's mental models
-> 3. Reference specific chapters and concepts
-> 4. All of the above"
-
-Use the answer to weight what gets highlighted in the SKILL.md Core section.
-
----
-
-## Step 5 — Determine skill name
-
-If `$1` was provided, use it as the skill slug.
-Otherwise, propose two options and let the user choose:
-- **By author-concept**: `{author-lastname}-{core-concept}` (e.g. `cialdini-influence`, `meadows-systems`)
-- **By title**: lowercase hyphens from book title (e.g. `designing-data-intensive-apps`)
-
-Default to author-concept format if the book has a strong methodological identity.
-
-Check that `~/.claude/skills/<skill_name>/` does NOT already exist.
-If it does, append `-2` or ask the user before overwriting.
-
----
-
-## Step 6 — Create skill directory structure
+Проверка и установка в Ubuntu/WSL:
 
 ```bash
-mkdir -p ~/.claude/skills/<skill_name>/chapters
+sudo apt update
+sudo apt install -y poppler-utils python3-pip
+# Python 3.11+ (Debian/Ubuntu 24+) требует --break-system-packages
+python3 -m pip install --break-system-packages PyPDF2 pdfminer.six ebooklib beautifulsoup4
 ```
 
----
+> **Pitfall (Python 3.11+/Ubuntu 24.04+)**: без `--break-system-packages` pip отказывается ставить в user site из-за PEP 668. Ошибка: `notice: consider using --break-system-packages`. Всегда используй этот флаг на современных системах.
 
-## Step 7 — Generate chapter summaries
+Опционально для сложных технических PDF:
 
-**TOKEN BUDGET RULE — CRITICAL:**
-- Each chapter summary file: **800–1,200 tokens** (dense, not verbose)
-- Files are loaded on-demand — they are NOT capped per se, but keep them useful and tight
+```bash
+python3 -m pip install --user docling
+```
 
-For EACH chapter/major section identified in Step 3:
+## Процедура
 
-Read the corresponding section of `/tmp/book_skill_work/full_text.txt` (use character offsets or grep for chapter headings).
+### 1. Проверить аргументы
 
-Create `~/.claude/skills/<skill_name>/chapters/ch<NN>-<slug>.md` using the structure below.
+Проверь, что файл существует:
 
-**Adapt emphasis based on `BOOK_TYPE`:**
-- `technical` → prioritize "Code Examples", "Reference Tables", and "Commands & APIs" sections; preserve exact syntax
-- `text` → prioritize "Frameworks Introduced", "Mental Models", and "Key Takeaways"; skip empty technical sections
+```bash
+test -f "<book_path>" && echo FILE_OK || echo FILE_NOT_FOUND
+```
 
+Проверь расширение или сигнатуру файла. Поддерживаются только PDF и EPUB.
+
+### 2. Определить режим извлечения
+
+Спроси пользователя, если режим не очевиден:
+
+1. `technical` — книга с кодом, таблицами, формулами, схемами; лучше использовать Docling.
+2. `text` — в основном обычный текст; лучше использовать быстрый `pdftotext` с запасными вариантами.
+
+Если пользователь не уверен, выбери `text` и предупреди, что для сложной верстки качество может быть ниже.
+
+### 3. Извлечь текст
+
+Запусти помощник:
+
+```bash
+python3 ~/.hermes/skills/book-to-skill/scripts/extract.py "<book_path>" --mode <technical|text>
+```
+
+После успешного выполнения будут созданы:
+
+```text
+/tmp/book_skill_work/full_text.txt
+/tmp/book_skill_work/metadata.json
+```
+
+Прочитай `metadata.json` и оцени объем: страницы, слова, примерное число токенов, обнаруженные главы, наличие оглавления. **Определи язык книги**: поле `"language"` — `"ru"` или `"en"`.
+
+### 4. Предварительно сообщить пользователю объем работы
+
+Перед полной генерацией сообщи:
+
+```text
+Книга: <filename>
+Формат: <pdf|epub>
+Язык: <ru|en>
+Страниц/разделов: ~<N>
+Слов: ~<N>
+Примерный объем исходного текста: ~<N>K токенов
+```
+
+Будут созданы: SKILL.md, chapters/, glossary.md, patterns.md, cheatsheet.md
+
+Если книга очень большая, предложи режим `analyze only` — только анализ структуры без записи итогового скилла.
+
+### 5. Проанализировать структуру книги
+
+Прочитай начало `/tmp/book_skill_work/full_text.txt`, оглавление и заголовки глав. Определи:
+
+- название книги;
+- автора или авторов;
+- структуру глав;
+- основные темы;
+- ключевые фреймворки;
+- термины;
+- методы;
+- анти-паттерны;
+- возможное имя скилла;
+- **язык книги** (из `metadata.json` → `"language"`: `"ru"` или `"en"`).
+
+Если имя не задано пользователем, выбери короткий slug в нижнем регистре через дефисы. Предпочтительный формат: `<author-or-topic>-<core-concept>`.
+
+### 6. Создать каталог результата
+
+```bash
+mkdir -p ~/.hermes/skills/<skill_name>/chapters
+```
+
+Если каталог уже существует, не перезаписывай молча. Спроси пользователя или создай вариант с суффиксом `-2`.
+
+### 7. Создать файлы глав
+
+Для каждой главы создай файл:
+
+```text
+~/.hermes/skills/<skill_name>/chapters/ch<NN>-<slug>.md
+```
+
+Структура файла главы — **заголовки секций на языке книги**:
+
+**English:**
 ```markdown
-# Chapter N: <Full Title>
+# Chapter N: <Title>
 
 ## Core Idea
-<1–2 sentences: the single most important thing this chapter teaches>
+<1–2 предложения о главной идее главы.>
 
 ## Frameworks Introduced
-- **<Framework Name>**: <exact formulation — preserve the author's naming>
-  - When to use: <specific situation>
-  - How: <steps or criteria>
+- **<Framework>**: <что это и когда применять>
+  - When to use: <ситуация>
+  - How: <шаги или критерии>
 
 ## Key Concepts
-- **<Term>**: <precise definition in 1 sentence>
-(5–10 most important terms from this chapter)
+- **<Term>**: <точное определение> (Ch N)
 
 ## Mental Models
-<2–4 frameworks or thinking tools. Write as "Use X when Y" or "Think of X as Y">
+- <модель мышления в прикладной формулировке>
 
 ## Anti-patterns
-- **<What to avoid>**: <why it fails>
+- **<что избегать>**: <почему это ошибка>
 
-## Code Examples *(technical books only — omit if BOOK_TYPE=text)*
-<!-- Copy the most instructive snippet from the chapter. Preserve indentation exactly. -->
-```<language>
-<key code example from this chapter>
-```
-- **What it demonstrates**: <one line>
+## Code Examples
+<Только для технических книг. Сохраняй синтаксис и отступы. Если кода нет, раздел не добавляй.>
 
-## Reference Tables *(technical books only — omit if BOOK_TYPE=text)*
-<!-- Reproduce any comparison matrix, parameter table, or decision table from the chapter in markdown. -->
+## Reference Tables
+<Только если в книге есть важные таблицы, матрицы или сравнения.>
 
 ## Key Takeaways
-1. <Actionable insight>
-2. <Actionable insight>
-3. <Actionable insight>
-(3–7 takeaways a practitioner must remember)
+1. <прикладной вывод>
+2. <прикладной вывод>
+3. <прикладной вывод>
 
 ## Connects To
-- **Ch N**: <why this chapter relates>
-- **<Concept>**: <external concept or standard it connects with>
+- **Ch N**: <связь>
 ```
 
----
+**Русский:**
+```markdown
+# Глава N: <Название>
 
-## Step 8 — Generate supporting files
+## Ключевая идея
+<1–2 предложения о главной идее главы.>
 
-### glossary.md
-Create `~/.claude/skills/<skill_name>/glossary.md`:
-- Every significant term from the book, alphabetically sorted
-- Format: `**Term** — definition (Ch N)`
-- Max 1,500 tokens
+## Введенные фреймворки
+- **<Фреймворк>**: <что это и когда применять>
+  - Когда использовать: <ситуация>
+  - Как: <шаги или критерии>
 
-### patterns.md
-Create `~/.claude/skills/<skill_name>/patterns.md`:
-- All concrete techniques, design patterns, algorithms from the book
-- Format: `## Pattern Name\n**When to use**: ...\n**How**: ...\n**Trade-offs**: ...`
-- Max 2,000 tokens
+## Ключевые понятия
+- **<Термин>**: <точное определение> (Гл N)
 
-### cheatsheet.md
-Create `~/.claude/skills/<skill_name>/cheatsheet.md`:
-- Decision tables, comparison matrices, quick-reference rules
-- The content you'd want on a single printed page
-- Max 1,000 tokens
+## Ментальные модели
+- <модель мышления в прикладной формулировке>
 
----
+## Анти-паттерны
+- **<что избегать>**: <почему это ошибка>
 
-## Step 9 — Generate the master SKILL.md
+## Примеры кода
+<Только для технических книг. Сохраняй синтаксис и отступы. Если кода нет, раздел не добавляй.>
 
-**CRITICAL TOKEN BUDGET: Keep SKILL.md body under 4,000 tokens.**
-Compaction truncates from the END — put the most important content FIRST.
+## Справочные таблицы
+<Только если в книге есть важные таблицы, матрицы или сравнения.>
 
-Create `~/.claude/skills/<skill_name>/SKILL.md`:
+## Ключевые выводы
+1. <прикладной вывод>
+2. <прикладной вывод>
+3. <прикладной вывод>
 
+## Связано с
+- **Гл N**: <связь>
+```
+
+Ориентир: 800–1200 токенов на главу. Пиши плотно, без длинного пересказа.
+
+### 8. Создать supporting files
+
+Создай `glossary.md` — заголовки на языке книги:
+
+**English:**
+```markdown
+# Glossary
+
+**Term** — definition (Ch N)
+```
+
+**Русский:**
+```markdown
+# Глоссарий
+
+**Термин** — определение (Гл N)
+```
+
+Создай `patterns.md` — заголовки на языке книги:
+
+**English:**
+```markdown
+# Patterns and Methods
+
+## Pattern Name
+**When to use**: ...
+**How**: ...
+**Trade-offs**: ...
+```
+
+**Русский:**
+```markdown
+# Паттерны и методы
+
+## Название паттерна
+**Когда использовать**: ...
+**Как**: ...
+**Компромиссы**: ...
+```
+
+Создай `cheatsheet.md` — заголовки на языке книги:
+
+**English:**
+```markdown
+# Cheatsheet
+
+Краткие правила, таблицы решений, сравнения, контрольные списки.
+```
+
+**Русский:**
+```markdown
+# Шпаргалка
+
+Краткие правила, таблицы решений, сравнения, контрольные списки.
+```
+
+Ограничения:
+
+- `glossary.md`: до 1500 токенов;
+- `patterns.md`: до 2000 токенов;
+- `cheatsheet.md`: до 1000 токенов.
+
+### 9. Создать главный SKILL.md результата
+
+Главный файл должен быть совместим с Hermes Agent: YAML-frontmatter, затем Markdown-инструкции.
+
+Шаблон на языке книги:
+
+**English:**
 ```markdown
 ---
 name: <skill_name>
-description: Knowledge base from "<Full Title>" by <Author(s)>. Use when applying <author>'s frameworks for <key topics, 3–6 terms>.
-when_to_use: <10–15 trigger phrases based on book topics and terms. Comma-separated.>
-allowed-tools: Read Grep
-argument-hint: [topic, framework name, or chapter number]
+description: Knowledge base from "<Full Title>" by <Author>. Use when applying the book's frameworks for <topics>.
+version: 1.0.0
+metadata:
+  hermes:
+    tags: [book, knowledge-base, <topic1>, <topic2>]
 ---
 
 # <Full Title>
-**Author**: <Author(s)> | **Pages**: ~<N> | **Chapters**: <N> | **Generated**: <YYYY-MM-DD>
 
-## How to Use This Skill
+**Author**: <Author>
+**Generated**: <YYYY-MM-DD>
+**Source**: <filename>
+**Chapters**: <N>
 
-- **Without arguments** — `/skill-name` loads core frameworks for reference
-- **With a topic** — `/skill-name replication` → I find and read the relevant chapter
-- **With chapter** — `/skill-name ch05` → I load that specific chapter
-- **Browse** — ask "what chapters do you have?" to see the full index
+## When to Use
 
-When you ask about a topic not covered in Core Frameworks below, I will read
-the relevant chapter file before answering.
-
----
+Use this skill when the user asks about <major topics>, named frameworks, chapter references, methods, principles, or decisions covered by the book.
 
 ## Core Frameworks & Mental Models
-<!-- ~2,000 tokens: the author's most important named frameworks and principles.
-     Preserve exact names. Write as "Use X when Y", "Prefer X over Y because Z".
-     This is a toolkit, not a summary. -->
 
-<generate 2,000 tokens of the most critical frameworks and insights here>
-
----
+<Самые важные фреймворки книги. Писать как прикладной инструмент: "Use X when Y".>
 
 ## Chapter Index
 
 | # | Title | Key Frameworks |
 |---|-------|----------------|
-| [ch01](chapters/ch01-<slug>.md) | <Title> | <framework1>, <framework2> |
-| [ch02](chapters/ch02-<slug>.md) | <Title> | <framework1>, <framework2> |
-...
+| [ch01](chapters/ch01-<slug>.md) | <Title> | <frameworks> |
 
 ## Topic Index
 
-<!-- Alphabetical. Major terms/frameworks → chapter(s) that cover them. -->
-- **<Term>** → ch<N>[, ch<N>]
 - **<Term>** → ch<N>
+- **<Framework>** → ch<N>, ch<M>
 
 ## Supporting Files
 
-- [glossary.md](glossary.md) — all key terms with definitions
-- [patterns.md](patterns.md) — all techniques and design patterns
-- [cheatsheet.md](cheatsheet.md) — quick reference tables and decision guides
+- [glossary.md](glossary.md) — definitions and key terms
+- [patterns.md](patterns.md) — methods, techniques, patterns
+- [cheatsheet.md](cheatsheet.md) — quick reference
 
----
+## Procedure for the Agent
+
+1. If the user asks a broad question, answer from Core Frameworks first.
+2. If the user asks about a specific topic, consult Topic Index and read the relevant chapter file.
+3. If the user asks for terminology, read `glossary.md`.
+4. If the user asks how to apply a method, read `patterns.md` and the relevant chapter.
+5. If the user needs a quick decision, read `cheatsheet.md`.
+6. Do not invent chapter claims. If the generated files do not cover the question, say that the book-derived skill does not contain enough information.
 
 ## Scope & Limits
 
-This skill covers the book content only. For hands-on implementation in your codebase,
-combine with project-specific tools. For topics beyond this book, check related skills
-or ask Claude directly.
+This skill is derived from the supplied book. It is a structured working memory, not a replacement for the full source text. Do not provide long verbatim excerpts from copyrighted material.
 ```
 
+**Русский:**
+```markdown
+---
+name: <skill_name>
+description: База знаний по книге "<Полное название>" автора <Автор>. Используй когда применяешь фреймворки книги для <темы>.
+version: 1.0.0
+metadata:
+  hermes:
+    tags: [book, knowledge-base, <topic1>, <topic2>]
 ---
 
-## Step 10 — Cleanup and report
+# <Полное название>
+
+**Автор**: <Автор>
+**Создано**: <YYYY-MM-DD>
+**Источник**: <filename>
+**Глав**: <N>
+
+## Когда использовать
+
+Используй этот скилл, когда пользователь спрашивает о <основные темы>, именованных фреймворках, ссылках на главы, методах, принципах или решениях, описанных в книге.
+
+## Ключевые фреймворки и ментальные модели
+
+<Самые важные фреймворки книги. Писать как прикладной инструмент: "Используй X когда Y".>
+
+## Указатель глав
+
+| # | Название | Ключевые фреймворки |
+|---|----------|---------------------|
+| [гл01](chapters/ch01-<slug>.md) | <Название> | <фреймворки> |
+
+## Указатель тем
+
+- **<Термин>** → гл<N>
+- **<Фреймворк>** → гл<N>, гл<M>
+
+## Вспомогательные файлы
+
+- [glossary.md](glossary.md) — определения и ключевые термины
+- [patterns.md](patterns.md) — методы, техники, паттерны
+- [cheatsheet.md](cheatsheet.md) — быстрая шпаргалка
+
+## Процедура для агента
+
+1. Если пользователь задает общий вопрос — отвечай на основе ключевых фреймворков.
+2. Если пользователь спрашивает о конкретной теме — посмотри указатель тем и прочитай соответствующий файл главы.
+3. Если пользователь спрашивает о терминологии — прочитай `glossary.md`.
+4. Если пользователь спрашивает, как применить метод — прочитай `patterns.md` и соответствующую главу.
+5. Если пользователю нужно быстрое решение — прочитай `cheatsheet.md`.
+6. Не придумывай утверждения о главах. Если сгенерированные файлы не содержат ответа — скажи, что в базе знаний книги недостаточно информации.
+
+## Область применения и ограничения
+
+Этот скилл создан на основе книги. Это структурированная рабочая память, а не замена полному тексту. Не предоставляй длинные цитаты из защищенного авторским правом материала.
+```
+
+### 10. Проверить результат
+
+Проверь наличие файлов:
+
+```bash
+find ~/.hermes/skills/<skill_name> -maxdepth 2 -type f | sort
+```
+
+Проверь, что главный `SKILL.md` начинается с валидного YAML-frontmatter и содержит `name` и `description`.
+
+### 11. Очистить временные файлы
 
 ```bash
 rm -rf /tmp/book_skill_work
 ```
 
-Then report to the user:
+### 12. Финальный отчет
 
-```
-✅ Skill created: ~/.claude/skills/<skill_name>/
+Сообщи пользователю:
 
-📚 Book: <Full Title> — <Author>
-📄 Pages: ~<N> | Chapters: <N>
-
-Files generated:
-  SKILL.md         — core frameworks + index   (~X tokens)
-  chapters/        — <N> chapter summaries     (~X tokens each, ~X total)
-  glossary.md      — key terms                 (~X tokens)
-  patterns.md      — techniques & patterns     (~X tokens)
-  cheatsheet.md    — quick reference           (~X tokens)
-  ─────────────────────────────────────────────────────
-  Total skill size: ~X tokens (loaded on-demand, not all at once)
-
-💡 Tip: run /cost in Claude Code to see the actual token usage for this session.
-
-Usage:
-  /<skill_name>                    → load core frameworks
-  /<skill_name> <topic>            → find and explain a topic
-  /<skill_name> ch<N>              → dive into a specific chapter
+```text
+Скилл создан: ~/.hermes/skills/<skill_name>/
+Файлы: SKILL.md, chapters/<N>, glossary.md, patterns.md, cheatsheet.md
+Как использовать: попросите Hermes применить скилл <skill_name> к нужной теме.
 ```
 
----
+## Правила качества
 
-## Quality Rules
-
-1. **Extract structure, not summaries** — capture named frameworks, exact formulations, anti-patterns; not chapter recaps
-2. **Preserve the author's precision** — "The 5 Whys" ≠ "ask why multiple times"; keep exact naming
-3. **Density over completeness** — a 1,000-token summary beats a 10,000-token excerpt
-4. **Practitioner voice** — write "Use X when Y", not "The book explains X"
-5. **Front-load SKILL.md** — compaction keeps the first 5,000 tokens; most important content comes first
-6. **Chapter files are on-demand** — they don't count against skill budget until loaded
-7. **Never copy raw book text** — always synthesize, summarize, extract signal
-8. **Topic index is critical** — it's how Claude navigates to the right chapter file
+1. Извлекай структуру, а не делай обычный пересказ.
+2. Сохраняй точные названия авторских фреймворков, методов и терминов.
+3. Не копируй длинные фрагменты книги дословно.
+4. Пиши прикладным языком: что делать, когда применять, какие ограничения.
+5. Главный `SKILL.md` держи компактным; подробности выноси в `chapters/`, `glossary.md`, `patterns.md`, `cheatsheet.md`.
+6. Всегда делай Topic Index — это навигационная карта для агента.
+7. Если источник плохо извлекся, не имитируй уверенность. Сообщи о проблеме и предложи режим `technical` с Docling.
+8. **Языковая консистентность**: все генерируемые файлы (chapter-файлы, glossary.md, patterns.md, cheatsheet.md, главный SKILL.md) должны быть на языке оригинала книги. Определи язык через `metadata.json` → `"language"`. Финальный отчёт пользователю — всегда на русском.
